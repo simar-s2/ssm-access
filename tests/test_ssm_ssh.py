@@ -45,9 +45,20 @@ def test_config_block(run, tmp_path):
     assert lines[0] == "Host dev-box"
     assert "HostName i-0a1b2c3d4e5f60001" in lines
     assert "User ubuntu" in lines
-    assert f"IdentityFile {tmp_path}/.ssh/ssm-ssh/id_ed25519" in lines
+    assert "IdentityFile ~/.ssh/ssm-ssh/id_ed25519" in lines
     assert f"ProxyCommand {SSM_SSH} proxy %h %p %r --profile dev --region eu-west-1" in lines
     assert calls == []
+
+
+def test_ssh_accepts_the_config_block(run, tmp_path):
+    proc, _ = run("config", "dev-box", "i-0a1b2c3d4e5f60001", "--profile", "dev")
+    config = tmp_path / "ssh_config"
+    config.write_text(proc.stdout)
+    resolved = subprocess.run(["ssh", "-F", str(config), "-G", "dev-box"],
+                              capture_output=True, text=True).stdout.splitlines()
+    assert "hostname i-0a1b2c3d4e5f60001" in resolved
+    assert "user ec2-user" in resolved
+    assert f"proxycommand {SSM_SSH} proxy %h %p %r --profile dev" in resolved
 
 
 def test_key_is_created_once_and_private(run, tmp_path):

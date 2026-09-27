@@ -68,6 +68,13 @@ resolve() { # resolve TARGET: print an instance ID
   esac
 }
 
+tilde() { # print a path under $HOME as ~/...; ssh expands it in both places we use it
+  case "$1" in
+    "$HOME"/*) printf '~%s\n' "${1#"$HOME"}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 ensure_key() {
   if [ ! -f "$KEY" ]; then
     mkdir -p "$KEY_DIR"
@@ -87,9 +94,9 @@ cmd_config() {
 Host $name
   HostName $target
   User $USER_NAME
-  IdentityFile $KEY
+  IdentityFile $(tilde "$KEY")
   IdentitiesOnly yes
-  ProxyCommand $self proxy %h %p %r${PROFILE:+ --profile $PROFILE}${REGION:+ --region $REGION}
+  ProxyCommand $(tilde "$self") proxy %h %p %r${PROFILE:+ --profile $PROFILE}${REGION:+ --region $REGION}
   ServerAliveInterval 30
 EOF
 }
