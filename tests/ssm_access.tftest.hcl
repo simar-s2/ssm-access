@@ -102,3 +102,16 @@ run "rejects_long_idle_timeout" {
 
   expect_failures = [var.session_idle_timeout_minutes]
 }
+
+run "operators_scoped_by_tag" {
+  command = plan
+
+  variables {
+    session_access_tag_values = ["platform", "data"]
+  }
+
+  assert {
+    condition     = length(local.access_tag) == 1 && tolist(local.access_tag[0]) == tolist(["platform", "data"])
+    error_message = "The tag condition is added when values are given."
+  }
+}
