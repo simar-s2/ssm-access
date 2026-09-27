@@ -8,6 +8,11 @@ output "instance_role_arn" {
   value       = aws_iam_role.instance.arn
 }
 
+output "operator_policy_arn" {
+  description = "Managed policy to attach to the roles, groups or permission sets of people who connect to instances."
+  value       = aws_iam_policy.operators.arn
+}
+
 output "session_kms_key_arns" {
   description = "Session encryption key per region."
   value       = { for r, k in aws_kms_key.sessions : r => k.arn }
