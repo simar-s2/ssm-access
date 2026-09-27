@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ssm-access: keyless instance access with Session Manager. Deploy one stack per
+  region; the stack in HomeRegion also creates the account-wide IAM role,
+  instance profile and operator policy. Every session is encrypted and its
+  transcript is kept in CloudWatch Logs.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: sec
+    AllowedPattern: '[a-z0-9-]{1,20}'
+  HomeRegion:
+    Type: String
+    Description: Region whose stack creates the IAM resources.
+  SessionIdleTimeoutMinutes:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    MaxValue: 60
+  SessionMaxDurationMinutes:
+    Type: Number
+    Default: 480
+    MinValue: 1
+    MaxValue: 1440
+  SessionLogRetentionDays:
+    Type: Number
+    Default: 365
+    AllowedValues: [30, 60, 90, 180, 365, 400, 545, 731, 1096, 1827, 2557, 3653]
+  RunAsUser:
+    Type: String
+    Default: ''
+    Description: OS user sessions run as. Empty keeps the default ssm-user.
+  ManageSessionPreferences:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Create the SSM-SessionManagerRunShell preferences document. Set false if it already exists.
+  EnableDefaultHostManagement:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Manage every EC2 instance with IMDSv2 through SSM, without an instance profile.
+  SshOsUsers:
+    Type: CommaDelimitedList
+    Default: 'ec2-user,ubuntu'
+    Description: OS users operators may push a temporary SSH key for.
+  SessionAccessTagValues:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: If set, operators can only reach instances whose ssm-access tag has one of these values. Empty means every instance.
+
+Conditions:
+  IsHomeRegion: !Equals [!Ref 'AWS::Region', !Ref HomeRegion]
+  ManagePreferences: !Equals [!Ref ManageSessionPreferences, 'true']
+  RunAs: !Not [!Equals [!Ref RunAsUser, '']]
+  Dhmc: !Equals [!Ref EnableDefaultHostManagement, 'true']
+  DhmcHome: !And [!Condition Dhmc, !Condition IsHomeRegion]
+  HasAccessTag: !Not [!Equals [!Join ['', !Ref SessionAccessTagValues], '']]
+
+Resources:
+
+  # ---------------- Per region: encryption, transcripts, preferences ----------------
+
+  SessionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encrypts Session Manager sessions and their transcripts
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AccountAdministration
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: kms:*
+            Resource: '*'
+          - Sid: CloudWatchLogs
+            Effect: Allow
+            Principal: { Service: !Sub 'logs.${AWS::Region}.amazonaws.com' }
+            Action: [kms:Encrypt*, kms:Decrypt*, kms:ReEncrypt*, kms:GenerateDataKey*, kms:Describe*]
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${NamePrefix}/ssm-sessions'
+
+  SessionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${NamePrefix}-ssm-sessions'
+      TargetKeyId: !Ref SessionKey
+
+  SessionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/${NamePrefix}/ssm-sessions'
+      RetentionInDays: !Ref SessionLogRetentionDays
+      KmsKeyId: !GetAtt SessionKey.Arn
+
+  SessionPreferences:
+    Type: AWS::SSM::Document
+    Condition: ManagePreferences
+    Properties:
+      Name: SSM-SessionManagerRunShell
+      DocumentType: Session
+      DocumentFormat: JSON
+      Content:
+        schemaVersion: '1.0'
+        description: 'Session Manager preferences: encrypted sessions, transcripts to CloudWatch Logs'
+        sessionType: Standard_Stream
+        inputs:
+          kmsKeyId: !GetAtt SessionKey.Arn
+          cloudWatchLogGroupName: !Ref SessionLogGroup
+          cloudWatchEncryptionEnabled: true
+          cloudWatchStreamingEnabled: true
+          s3BucketName: ''
+          s3EncryptionEnabled: false
+          idleSessionTimeout: !Ref SessionIdleTimeoutMinutes
+          maxSessionDuration: !Ref SessionMaxDurationMinutes
+          runAsEnabled: !If [RunAs, true, false]
+          runAsDefaultUser: !Ref RunAsUser
+          shellProfile:
+            linux: cd ~ && exec bash -l
+            windows: ''
+
+  DefaultHostManagementSetting:
+    Type: AWS::SSM::ServiceSetting
+    Condition: Dhmc
+    Properties:
+      SettingId: /ssm/managed-instance/default-ec2-instance-management-role
+      SettingValue: !Sub 'service-role/${NamePrefix}-ssm-default-host'
+
+  # ---------------- Home region only: IAM ----------------
+
+  AgentSessionLoggingPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: IsHomeRegion
+    Properties:
+      ManagedPolicyName: !Sub '${NamePrefix}-ssm-session-logging'
+      Description: What the SSM agent needs to use encrypted, logged sessions in every region.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SessionEncryption
+            Effect: Allow
+            Action: [kms:Decrypt, kms:GenerateDataKey]
+            Resource: !Sub 'arn:${AWS::Partition}:kms:*:${AWS::AccountId}:key/*'
+            Condition:
+              'ForAnyValue:StringEquals': { 'kms:ResourceAliases': !Sub 'alias/${NamePrefix}-ssm-sessions' }
+          - Sid: SessionTranscripts
+            Effect: Allow
+            Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogGroups, logs:DescribeLogStreams]
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/${NamePrefix}/ssm-sessions'
+              - !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/${NamePrefix}/ssm-sessions:*'
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Condition: IsHomeRegion
+    Properties:
+      RoleName: !Sub '${NamePrefix}-ssm-instance'
+      Description: Lets EC2 instances be managed by Systems Manager and use logged Session Manager sessions.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - !Ref AgentSessionLoggingPolicy
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: IsHomeRegion
+    Properties:
+      InstanceProfileName: !Sub '${NamePrefix}-ssm-instance'
+      Roles: [!Ref InstanceRole]
+
+  DefaultHostManagementRole:
+    Type: AWS::IAM::Role
+    Condition: DhmcHome
+    Properties:
+      RoleName: !Sub '${NamePrefix}-ssm-default-host'
+      Path: /service-role/
+      Description: 'Default Host Management Configuration: SSM manages every EC2 instance without an instance profile.'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ssm.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedEC2InstanceDefaultPolicy'
+        - !Ref AgentSessionLoggingPolicy
+
+  OperatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: IsHomeRegion
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: FindInstances uses Describe calls that do not support resource-level permissions.
+    Properties:
+      ManagedPolicyName: !Sub '${NamePrefix}-ssm-operators'
+      Description: Session Manager shells, SSH over SSM and port forwarding, through approved documents only.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: StartSessionOnInstances
+            Effect: Allow
+            Action: ssm:StartSession
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*'
+            Condition: !If
+              - HasAccessTag
+              - BoolIfExists: { 'ssm:SessionDocumentAccessCheck': 'true' }
+                StringEquals: { 'ssm:resourceTag/ssm-access': !Ref SessionAccessTagValues }
+              - BoolIfExists: { 'ssm:SessionDocumentAccessCheck': 'true' }
+          - Sid: SessionDocuments
+            Effect: Allow
+            Action: ssm:StartSession
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:document/SSM-SessionManagerRunShell'
+              - !Sub 'arn:${AWS::Partition}:ssm:*::document/AWS-StartSSHSession'
+              - !Sub 'arn:${AWS::Partition}:ssm:*::document/AWS-StartPortForwardingSession'
+              - !Sub 'arn:${AWS::Partition}:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost'
+          - Sid: OwnSessionsOnly
+            Effect: Allow
+            Action: [ssm:ResumeSession, ssm:TerminateSession]
+            Resource: !Sub 'arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:session/${!aws:userid}-*'
+          - Sid: FindInstances
+            Effect: Allow
+            Action: [ssm:DescribeInstanceInformation, ssm:DescribeSessions, ec2:DescribeInstances]
+            Resource: '*'
+          - Sid: ConnectionStatus
+            Effect: Allow
+            Action: ssm:GetConnectionStatus
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*'
+          - Sid: SessionEncryption
+            Effect: Allow
+            Action: kms:GenerateDataKey
+            Resource: !Sub 'arn:${AWS::Partition}:kms:*:${AWS::AccountId}:key/*'
+            Condition:
+              'ForAnyValue:StringEquals': { 'kms:ResourceAliases': !Sub 'alias/${NamePrefix}-ssm-sessions' }
+          - Sid: TemporarySshKey
+            Effect: Allow
+            Action: ec2-instance-connect:SendSSHPublicKey
+            Resource: !Sub 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*'
+            Condition: !If
+              - HasAccessTag
+              - StringEquals:
+                  'ec2:osuser': !Ref SshOsUsers
+                  'ec2:ResourceTag/ssm-access': !Ref SessionAccessTagValues
+              - StringEquals: { 'ec2:osuser': !Ref SshOsUsers }
+
+Outputs:
+  SessionKeyArn:
+    Value: !GetAtt SessionKey.Arn
+  InstanceProfileName:
+    Condition: IsHomeRegion
+    Value: !Ref InstanceProfile
+  OperatorPolicyArn:
+    Condition: IsHomeRegion
+    Value: !Ref OperatorPolicy
