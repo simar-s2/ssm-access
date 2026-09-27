@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# ssm-ssh: SSH to EC2 instances through Session Manager, with no inbound port
+# and no key stored on the instance.
+#
+# Each connection pushes your public key with EC2 Instance Connect, which lets
+# the instance accept it for 60 seconds, then tunnels SSH through an SSM session
+# (AWS-StartSSHSession). Works with plain ssh, scp, rsync and VS Code Remote-SSH.
+#
+#   ssm-ssh config NAME TARGET [options]   print an ~/.ssh/config block
+#   ssm-ssh proxy TARGET PORT USER [opts]  the ProxyCommand ssh runs
+#
+# TARGET is an instance ID (i-...) or the value of an instance's Name tag.
+set -euo pipefail
+
+KEY_DIR="${SSM_SSH_KEY_DIR:-$HOME/.ssh/ssm-ssh}"
+KEY="$KEY_DIR/id_ed25519"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ssm-ssh config NAME TARGET [--user USER] [--profile PROFILE] [--region REGION]
+      Print an ssh config block. Append it to ~/.ssh/config, then run
+      `ssh NAME` or pick NAME in VS Code Remote-SSH.
+
+  ssm-ssh proxy TARGET PORT USER [--profile PROFILE] [--region REGION]
+      Used as ProxyCommand by the config block.
+
+TARGET is an instance ID (i-...) or an instance's Name tag.
+Needs the AWS CLI v2 and the Session Manager plugin.
+USAGE
+}
+
+die() { echo "ssm-ssh: $*" >&2; exit 1; }
+
+parse_aws_opts() { # sets PROFILE and REGION from --profile/--region, leaves the rest in ARGS
+  PROFILE="" REGION="" ARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile) PROFILE="${2:?--profile needs a value}"; shift ;;
+      --region) REGION="${2:?--region needs a value}"; shift ;;
+      --user) USER_NAME="${2:?--user needs a value}"; shift ;;
+      *) ARGS+=("$1") ;;
+    esac
+    shift
+  done
+}
+
+aws_() {
+  local opts=()
+  if [ -n "$PROFILE" ]; then opts+=(--profile "$PROFILE"); fi
+  if [ -n "$REGION" ]; then opts+=(--region "$REGION"); fi
+  aws ${opts[@]+"${opts[@]}"} "$@"
+}
+
+resolve() { # resolve TARGET: print an instance ID
+  case "$1" in
+    i-*|mi-*) echo "$1"; return ;;
+  esac
+  local ids
+  ids=$(aws_ ec2 describe-instances \
+    --filters "Name=tag:Name,Values=$1" "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[].InstanceId' --output text)
+  read -r -a found <<<"$ids"
+  case "${#found[@]}" in
+    1) echo "${found[0]}" ;;
+    0) die "no running instance named '$1'" ;;
+    *) die "several running instances named '$1': ${found[*]}; use an instance ID" ;;
+  esac
+}
+
+ensure_key() {
+  if [ ! -f "$KEY" ]; then
+    mkdir -p "$KEY_DIR"
+    chmod 700 "$KEY_DIR"
+    ssh-keygen -q -t ed25519 -N "" -C "ssm-ssh" -f "$KEY"
+  fi
+}
+
+cmd_config() {
+  USER_NAME=ec2-user
+  parse_aws_opts "$@"
+  [ "${#ARGS[@]}" -eq 2 ] || { usage >&2; exit 2; }
+  local name=${ARGS[0]} target=${ARGS[1]} self
+  self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  ensure_key
+  cat <<EOF
+Host $name
+  HostName $target
+  User $USER_NAME
+  IdentityFile $KEY
+  IdentitiesOnly yes
+  ProxyCommand $self proxy %h %p %r${PROFILE:+ --profile $PROFILE}${REGION:+ --region $REGION}
+  ServerAliveInterval 30
+EOF
+}
+
+cmd_proxy() {
+  parse_aws_opts "$@"
+  [ "${#ARGS[@]}" -eq 3 ] || { usage >&2; exit 2; }
+  local target=${ARGS[0]} port=${ARGS[1]} os_user=${ARGS[2]} id
+  command -v session-manager-plugin >/dev/null 2>&1 ||
+    die "the Session Manager plugin is not installed: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+  ensure_key
+  id=$(resolve "$target")
+  aws_ ec2-instance-connect send-ssh-public-key --instance-id "$id" \
+    --instance-os-user "$os_user" --ssh-public-key "file://$KEY.pub" >/dev/null
+  # The key is now accepted for 60 seconds; ssh authenticates within that window.
+  aws_ ssm start-session --target "$id" --document-name AWS-StartSSHSession \
+    --parameters "portNumber=$port"
+}
+
+case "${1:-}" in
+  config) shift; cmd_config "$@" ;;
+  proxy) shift; cmd_proxy "$@" ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

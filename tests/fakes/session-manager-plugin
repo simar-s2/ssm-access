@@ -1,0 +1,3 @@
+#!/bin/sh
+# Presence is all ssm-ssh checks for.
+exit 0

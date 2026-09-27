@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Fake `aws` CLI for the ssm-ssh tests: logs each call and resolves Name tags."""
+
+import json
+import os
+import sys
+
+argv = sys.argv[1:]
+with open(os.environ["FAKE_AWS_LOG"], "a") as f:
+    f.write(json.dumps(argv) + "\n")
+
+if "describe-instances" in argv:
+    names = json.loads(os.environ.get("FAKE_INSTANCES", "{}"))
+    wanted = next(a for a in argv if a.startswith("Name=tag:Name,Values=")).split("=", 2)[2]
+    print("\t".join(names.get(wanted, [])))
