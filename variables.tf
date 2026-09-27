@@ -60,13 +60,10 @@ variable "manage_session_preferences" {
 
 # ---------------------------------------------------------------- access
 
-variable "session_target_tag" {
-  type = object({
-    key    = string
-    values = list(string)
-  })
-  description = "Only instances with this tag can be reached by operators. Null means every instance in the account."
-  default     = null
+variable "session_access_tag_values" {
+  type        = list(string)
+  description = "If set, operators can only reach instances whose ssm-access tag has one of these values (for example [\"platform\"]). Empty means every instance."
+  default     = []
 }
 
 variable "ssh_os_users" {

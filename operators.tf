@@ -4,7 +4,7 @@
 
 locals {
   instance_arn = "arn:${local.partition}:ec2:*:${local.account_id}:instance/*"
-  target_tag   = var.session_target_tag == null ? [] : [var.session_target_tag]
+  access_tag   = length(var.session_access_tag_values) > 0 ? [var.session_access_tag_values] : []
 }
 
 data "aws_iam_policy_document" "operators" {
@@ -21,11 +21,11 @@ data "aws_iam_policy_document" "operators" {
     }
 
     dynamic "condition" {
-      for_each = local.target_tag
+      for_each = local.access_tag
       content {
         test     = "StringEquals"
-        variable = "ssm:resourceTag/${condition.value.key}"
-        values   = condition.value.values
+        variable = "ssm:resourceTag/ssm-access"
+        values   = condition.value
       }
     }
   }
@@ -79,11 +79,11 @@ data "aws_iam_policy_document" "operators" {
     }
 
     dynamic "condition" {
-      for_each = local.target_tag
+      for_each = local.access_tag
       content {
         test     = "StringEquals"
-        variable = "ec2:ResourceTag/${condition.value.key}"
-        values   = condition.value.values
+        variable = "ec2:ResourceTag/ssm-access"
+        values   = condition.value
       }
     }
   }
