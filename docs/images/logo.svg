@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232a3b"/>
+      <stop offset="1" stop-color="#0b0e14"/>
+    </linearGradient>
+    <linearGradient id="accent" gradientUnits="userSpaceOnUse" x1="40" y1="40" x2="216" y2="216">
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#c084fc"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <rect id="shape" x="36" y="50" width="184" height="156" rx="20"/>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#tile)"/>
+  <use href="#shape" fill="url(#accent)" filter="url(#glow)" opacity="0.55"/>
+  <use href="#shape" fill="url(#accent)"/>
+  <g stroke="#f8fafc" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M74 94 L110 124 L74 154"/>
+    <path d="M126 162 H182"/>
+  </g>
+</svg>
